@@ -1,4 +1,5 @@
 import { Kafka } from "kafkajs";
+import { v4 as uuid } from "uuid";
 
 const kafka = new Kafka({
   clientId: "delivery-service",
@@ -20,25 +21,27 @@ async function simulateSend(channel, data) {
   }
 }
 
-async function logToKafka(status, channel, messageId, attempts) {
+async function logToKafka(status, channel, messageId, attempts, parentSpanId) {
   await producer.send({
     topic: "logs-topic",
     messages: [
       {
         key: "delivery-log",
         value: JSON.stringify({
+          traceId: messageId,       
+          spanId: uuid(),            
+          parentSpanId,              
           type: "delivery",
+          service: "delivery-service",
           status,
           channel,
           messageId,
           attempts,
-          timestamp: new Date().toISOString(),
         }),
       },
     ],
   });
 }
-
 async function start() {
   await consumer.connect();
   await producer.connect();
@@ -50,7 +53,8 @@ async function start() {
   await consumer.run({
     eachMessage: async ({ topic, partition, message }) => {
       const data = JSON.parse(message.value.toString());
-      const { channel, messageId } = data;
+      const { channel, messageId, spanId: parentSpanId } = data;
+
 
       console.log(`Received message ${messageId} for channel ${channel}`);
 
@@ -64,7 +68,8 @@ async function start() {
           await simulateSend(channel, data);
           delivered = true;
 
-          await logToKafka("delivered", channel, messageId, attempts);
+          await logToKafka("delivered", channel, messageId, attempts, parentSpanId);
+
           console.log(
             `Message ${messageId} delivered after ${attempts} attempt(s)`
           );
@@ -74,7 +79,8 @@ async function start() {
           );
 
           if (attempts >= maxAttempts) {
-            await logToKafka("failed", channel, messageId, attempts);
+            await logToKafka("failed", channel, messageId, attempts, parentSpanId);
+
             console.error(
               `Message ${messageId} permanently failed after ${attempts} attempts`
             );
