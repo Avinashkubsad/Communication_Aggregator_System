@@ -1,100 +1,30 @@
-import { Kafka } from "kafkajs";
-import { v4 as uuid } from "uuid";
+import express from "express";
+import { ApolloServer } from "apollo-server-express";
+import dotenv from "dotenv";
+import typeDefs from "./schema.js";
+import resolvers from "./resolvers.js";
+import { startKafkaConsumer } from "./kafka.js";
 
-const kafka = new Kafka({
-  clientId: "delivery-service",
-  brokers: [process.env.KAFKA_BROKER || "localhost:9092"],
-});
+dotenv.config();
 
-const consumer = kafka.consumer({ groupId: "delivery-group" });
-const producer = kafka.producer();
+const PORT = process.env.PORT || 5002;
 
-async function simulateSend(channel, data) {
-  console.log(
-    `Simulating ${channel.toUpperCase()} send to ${data.to}: "${data.body}"`
-  );
-
-  // 20% chance of failure to demo retry logic
-  const fail = Math.random() < 0.2;
-  if (fail) {
-    throw new Error("Simulated delivery failure");
-  }
-}
-
-async function logToKafka(status, channel, messageId, attempts, parentSpanId) {
-  await producer.send({
-    topic: "logs-topic",
-    messages: [
-      {
-        key: "delivery-log",
-        value: JSON.stringify({
-          traceId: messageId,       
-          spanId: uuid(),            
-          parentSpanId,              
-          type: "delivery",
-          service: "delivery-service",
-          status,
-          channel,
-          messageId,
-          attempts,
-        }),
-      },
-    ],
-  });
-}
 async function start() {
-  await consumer.connect();
-  await producer.connect();
+  // Start Kafka consumer
+  startKafkaConsumer();
 
-  await consumer.subscribe({ topic: "task-router-topic", fromBeginning: false });
+  const app = express();
+  const server = new ApolloServer({ typeDefs, resolvers ,
+     introspection: true,   // 👈 ADD THIS LINE
+    playground: true       
+  });
 
-  console.log("Delivery Service is listening to task-router-topic...");
+  await server.start();
+  server.applyMiddleware({ app, path: "/graphql" });
 
-  await consumer.run({
-    eachMessage: async ({ topic, partition, message }) => {
-      const data = JSON.parse(message.value.toString());
-      const { channel, messageId, spanId: parentSpanId } = data;
-
-
-      console.log(`Received message ${messageId} for channel ${channel}`);
-
-      const maxAttempts = 3;
-      let attempts = 0;
-      let delivered = false;
-
-      while (attempts < maxAttempts && !delivered) {
-        attempts++;
-        try {
-          await simulateSend(channel, data);
-          delivered = true;
-
-          await logToKafka("delivered", channel, messageId, attempts, parentSpanId);
-
-          console.log(
-            `Message ${messageId} delivered after ${attempts} attempt(s)`
-          );
-        } catch (err) {
-          console.warn(
-            `Attempt ${attempts} failed for ${messageId}: ${err.message}`
-          );
-
-          if (attempts >= maxAttempts) {
-            await logToKafka("failed", channel, messageId, attempts, parentSpanId);
-
-            console.error(
-              `Message ${messageId} permanently failed after ${attempts} attempts`
-            );
-          } else {
-            // Small delay between retries (500ms)
-            await new Promise((res) => setTimeout(res, 500));
-          }
-        }
-      }
-    },
+  app.listen(PORT, () => {
+    console.log(`🚀 Delivery GraphQL running at http://localhost:${PORT}/graphql`);
   });
 }
 
-start().catch((err) => {
-  console.error("Delivery Service error:", err);
-  process.exit(1);
-});
+start();
